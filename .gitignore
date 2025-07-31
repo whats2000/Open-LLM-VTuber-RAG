@@ -72,3 +72,7 @@ conf.yaml.backup
 tmp/
 private/
 mcp_servers.json
+
+# ignore knowledge base data
+data/company_docs/*
+!/data/company_docs/.gitkeep

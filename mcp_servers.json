@@ -7,6 +7,13 @@
       "ddg-search": {
         "command": "uvx",
         "args": ["duckduckgo-mcp-server"]
+      },
+      "local-vector-rag": {
+        "command": "uv",
+        "args": ["run", "python", "-m", "mcp_tools.local_vector_rag.server"],
+        "env": {
+          "PYTHONPATH": "."
+        }
       }
     }
 }

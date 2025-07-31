@@ -1,7 +1,7 @@
 """MCP Client for Open-LLM-Vtuber."""
-import json
-from contextlib import AsyncExitStack
-from typing import Dict, Any, List, Callable
+import asyncio
+from contextlib import AsyncExitStack, suppress
+from typing import Dict, Any, List, Callable, Optional
 from loguru import logger
 from datetime import timedelta
 
@@ -20,13 +20,32 @@ class MCPClient:
     Manages persistent connections to multiple MCP servers.
     """
 
-    def __init__(self, server_registery: ServerRegistry, send_text: Callable = None, client_uid: str = None) -> None:
-        """Initialize the MCP Client."""
+    def __init__(
+        self,
+        server_registery: ServerRegistry,
+        send_text: Callable | None = None,
+        client_uid: str | None = None,
+        shutdown_on_close: bool = True,
+    ) -> None:
+        """Initialize the MCP Client.
+
+        Args:
+            server_registery: Registry that knows how to spawn MCP servers.
+            send_text: Optional callback to send text to the UI/log.
+            client_uid: Optional identifier for this client instance.
+            shutdown_on_close: Whether to politely ask each server to exit
+                (by calling its "shutdown" tool) before tearing down pipes.
+                Strongly recommended on Windows to avoid Proactor pipe warnings.
+        """
         self.exit_stack: AsyncExitStack = AsyncExitStack()
         self.active_sessions: Dict[str, ClientSession] = {}
         self._list_tools_cache: Dict[str, List[Tool]] = {}  # Cache for list_tools
-        self._send_text: Callable = send_text
-        self._client_uid: str = client_uid
+        self._send_text: Optional[Callable] = send_text
+        self._client_uid: Optional[str] = client_uid
+        self._shutdown_on_close: bool = shutdown_on_close
+
+        # Keep the (read, write) transport tuple for each server if we need finer control later
+        self._transports: Dict[str, tuple] = {}
 
         if isinstance(server_registery, ServerRegistry):
             self.server_registery = server_registery
@@ -63,6 +82,8 @@ class MCPClient:
                 stdio_client(server_params)
             )
             read, write = stdio_transport
+            # Store for potential fine-grained shutdown later
+            self._transports[server_name] = (read, write)
 
             session = await self.exit_stack.enter_async_context(
                 ClientSession(read, write, read_timeout_seconds=timeout)
@@ -122,15 +143,15 @@ class MCPClient:
             for item in response.content:
                 item_dict = {"type": getattr(item, "type", "text")}
                 # Extract available attributes from content item
-                for attr in ["text", "data", "mimeType", "url", "altText"]: # Added url and altText
-                    if hasattr(item, attr) and getattr(item, attr) is not None: # Check for None
+                for attr in ["text", "data", "mimeType", "url", "altText"]:  # Added url and altText
+                    if hasattr(item, attr) and getattr(item, attr) is not None:  # Check for None
                         item_dict[attr] = getattr(item, attr)
                 content_items.append(item_dict)
         else:
             logger.warning(
                 f"MCPC: Tool '{tool_name}' returned no content. Returning empty content_items."
             )
-            content_items.append({"type": "text", "text": ""}) # Ensure content_items is not empty
+            content_items.append({"type": "text", "text": ""})  # Ensure content_items is not empty
 
         result = {
             "metadata": getattr(response, "metadata", {}),
@@ -138,15 +159,59 @@ class MCPClient:
         }
         return result
 
+    async def _graceful_shutdown_servers(self) -> None:
+        """Politely ask each connected server to shut down before closing pipes.
+
+        This prevents 'unclosed transport' / 'fileno on closed pipe' warnings on Windows.
+        """
+        if not self._shutdown_on_close:
+            return
+
+        servers = list(self.active_sessions.keys())  # snapshot keys
+        if not servers:
+            return
+
+        logger.info(f"MCPC: Requesting graceful shutdown for {len(servers)} server(s)...")
+
+        async def _shutdown_one(name: str):
+            # Try to call a 'shutdown' tool if the server supports it.
+            with suppress(Exception):
+                # Quick capability check from cache if available
+                tools = self._list_tools_cache.get(name)
+                if tools is None:
+                    # Avoid creating new sessions here; we already have sessions
+                    # but list_tools requires a roundtrip—it's fine because the session exists.
+                    tools = await self.list_tools(name)
+                names = {t.name for t in tools} if tools else set()
+                if "shutdown" in names:
+                    await asyncio.wait_for(
+                        self.call_tool(name, "shutdown", {}),
+                        timeout=3.0,
+                    )
+
+        await asyncio.gather(*[_shutdown_one(s) for s in servers], return_exceptions=True)
+        # Give the servers a tick to flush their response before we close streams
+        await asyncio.sleep(0.01)
+
     async def aclose(self) -> None:
         """Closes all active server connections."""
         logger.info(
             f"MCPC: Closing client instance and {len(self.active_sessions)} active connections..."
         )
-        await self.exit_stack.aclose()
+        # 1) Politely ask servers to exit
+        with suppress(Exception):
+            await self._graceful_shutdown_servers()
+
+        # 2) Close stacked contexts (ClientSession then stdio_client) in LIFO order
+        with suppress(Exception):
+            await self.exit_stack.aclose()
+
+        # 3) Clear state
         self.active_sessions.clear()
-        self._list_tools_cache.clear() # Clear cache on close
+        self._list_tools_cache.clear()
+        self._transports.clear()
         self.exit_stack = AsyncExitStack()
+
         logger.info("MCPC: Client instance closed.")
 
     async def __aenter__(self) -> "MCPClient":

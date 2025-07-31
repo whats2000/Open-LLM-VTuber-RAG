@@ -11,16 +11,12 @@ from loguru import logger
 
 from mcp.server.models import InitializationOptions
 from mcp.server import NotificationOptions, Server
-from mcp import JSONRPCError
 from mcp.types import (
-    CallToolResult,
-    EmptyResult,
-    ListToolsResult,
     TextContent,
     Tool,
 )
 
-from vector_search import LocalVectorRAG
+from .vector_search import LocalVectorRAG
 
 
 class LocalVectorRAGServer:
@@ -41,69 +37,38 @@ class LocalVectorRAGServer:
         """Setup MCP server handlers"""
         
         @self.server.list_tools()
-        async def handle_list_tools() -> ListToolsResult:
+        async def handle_list_tools():
             """List available tools"""
-            return ListToolsResult(
-                tools=[
-                    Tool(
-                        name="search_documents",
-                        description="Search for relevant documents using vector similarity or text matching",
-                        inputSchema={
-                            "type": "object",
-                            "properties": {
-                                "query": {
-                                    "type": "string",
-                                    "description": "The search query to find relevant documents"
-                                },
-                                "top_k": {
-                                    "type": "integer",
-                                    "description": "Number of top results to return (default: 3)",
-                                    "default": 3
-                                }
-                            },
-                            "required": ["query"]
-                        }
-                    ),
-                    Tool(
-                        name="reload_documents",
-                        description="Reload all documents from the configured folder",
-                        inputSchema={
-                            "type": "object",
-                            "properties": {}
-                        }
-                    ),
-                    Tool(
-                        name="get_document_stats",
-                        description="Get statistics about loaded documents",
-                        inputSchema={
-                            "type": "object",
-                            "properties": {}
-                        }
-                    )
-                ]
-            )
+            return [
+                Tool(
+                    name="search_documents",
+                    description="Search for documents",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Search query"
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                )
+            ]
 
         @self.server.call_tool()
-        async def handle_call_tool(name: str, arguments: dict) -> CallToolResult:
+        async def handle_call_tool(name: str, arguments: dict):
             """Handle tool calls"""
-            try:
-                if name == "search_documents":
-                    return await self._handle_search_documents(arguments)
-                elif name == "reload_documents":
-                    return await self._handle_reload_documents(arguments)
-                elif name == "get_document_stats":
-                    return await self._handle_get_document_stats(arguments)
-                else:
-                    raise JSONRPCError(-32601, f"Unknown tool: {name}")
-            except Exception as e:
-                logger.error(f"Error in tool call {name}: {e}")
-                raise JSONRPCError(-32000, f"Tool execution failed: {str(e)}")
+            if name == "search_documents":
+                return await self._handle_search_documents(arguments)
+            else:
+                raise ValueError(f"Unknown tool: {name}")
 
-    async def _handle_search_documents(self, arguments: dict) -> CallToolResult:
+    async def _handle_search_documents(self, arguments: dict):
         """Handle document search requests"""
         query = arguments.get("query")
         if not query:
-            raise JSONRPCError(-32602, "Missing required parameter: query")
+            raise ValueError("Missing required parameter: query")
         
         top_k = arguments.get("top_k", 3)
         
@@ -128,36 +93,7 @@ class LocalVectorRAGServer:
             response_text += f"Score: {result['score']:.4f} ({result['search_type']} search)\n"
             response_text += f"Content: {result['content']}\n\n"
         
-        return CallToolResult(
-            content=[TextContent(type="text", text=response_text)]
-        )
-
-    async def _handle_reload_documents(self, arguments: dict) -> CallToolResult:
-        """Handle document reload requests"""
-        self.rag.reload_documents()
-        doc_count = self.rag.get_document_count()
-        
-        return CallToolResult(
-            content=[TextContent(
-                type="text", 
-                text=f"Documents reloaded successfully. Loaded {doc_count} documents."
-            )]
-        )
-
-    async def _handle_get_document_stats(self, arguments: dict) -> CallToolResult:
-        """Handle document statistics requests"""
-        doc_count = self.rag.get_document_count()
-        supported_extensions = self.rag.get_supported_extensions()
-        
-        stats_text = f"Document Statistics:\n"
-        stats_text += f"- Total documents loaded: {doc_count}\n"
-        stats_text += f"- Documents folder: {self.rag.docs_folder}\n"
-        stats_text += f"- Supported file types: {', '.join(supported_extensions)}\n"
-        stats_text += f"- Vector search available: {'Yes' if self.rag.model else 'No (using text search)'}\n"
-        
-        return CallToolResult(
-            content=[TextContent(type="text", text=stats_text)]
-        )
+        return [TextContent(type="text", text=response_text)]
 
     async def run(self, transport_type: str = "stdio") -> None:
         """Run the MCP server"""

@@ -143,7 +143,7 @@ class LocalVectorRAG:
             logger.error(f"Failed to generate embeddings: {e}")
             self.embeddings = []
 
-    def search(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
+    def search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
         """
         Search for relevant documents based on query
 
